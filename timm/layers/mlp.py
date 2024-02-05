@@ -9,6 +9,7 @@ from torch import nn as nn
 from .grn import GlobalResponseNorm
 from .helpers import to_2tuple
 
+from src.msfp.quantize import fp32_to_msfp16, msfp16_matmul
 
 class Mlp(nn.Module):
     """ MLP as used in Vision Transformer, MLP-Mixer and related networks
@@ -39,11 +40,19 @@ class Mlp(nn.Module):
         self.drop2 = nn.Dropout(drop_probs[1])
 
     def forward(self, x):
-        x = self.fc1(x)
+        # x = self.fc1(x)
+        B1, N1, C1 = x.shape
+        fc1_weights, fc1_bias = dict(self.fc1.named_parameters())['weight'].data, dict(self.fc1.named_parameters())['bias'].data
+        fc1_weights_msfp, x_msfp = fp32_to_msfp16(fc1_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C1))
+        x = msfp16_matmul(x_msfp, fc1_weights_msfp)[:B1 * N1, :fc1_weights.size(0)].view(B1, N1, fc1_weights.size(0)) + fc1_bias
         x = self.act(x)
         x = self.drop1(x)
         x = self.norm(x)
-        x = self.fc2(x)
+        # x = self.fc2(x)
+        B2, N2, C2 = x.shape
+        fc2_weights, fc2_bias = dict(self.fc2.named_parameters())['weight'].data, dict(self.fc2.named_parameters())['bias'].data
+        fc2_weights_msfp, x2_msfp = fp32_to_msfp16(fc2_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C2))
+        x = msfp16_matmul(x2_msfp, fc2_weights_msfp)[:B2 * N2, :fc2_weights.size(0)].view(B2, N2, fc2_weights.size(0)) + fc2_bias
         x = self.drop2(x)
         return x
 

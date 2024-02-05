@@ -48,6 +48,8 @@ from ._builder import build_model_with_cfg
 from ._manipulate import named_apply, checkpoint_seq, adapt_input_conv
 from ._registry import generate_default_cfgs, register_model, register_model_deprecations
 
+from src.msfp.quantize import fp32_to_msfp16, msfp16_matmul
+
 __all__ = ['VisionTransformer']  # model_registry will add each entrypoint fn to this
 
 
@@ -83,7 +85,11 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        qkv_weights, qkv_bias = dict(self.qkv.named_parameters())['weight'].data, dict(self.qkv.named_parameters())['bias'].data
+        qkv_weights_msfp, x_msfp = fp32_to_msfp16(qkv_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
+        qkv = msfp16_matmul(x_msfp, qkv_weights_msfp)[:B * N, :qkv_weights.size(0)].view(B, N, qkv_weights.size(0)) + qkv_bias
+        qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
@@ -100,7 +106,10 @@ class Attention(nn.Module):
             x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
+        # x = self.proj(x)
+        proj_weights, proj_bias = dict(self.proj.named_parameters())['weight'].data, dict(self.proj.named_parameters())['bias'].data
+        proj_weights_msfp, x_msfp = fp32_to_msfp16(proj_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
+        x = msfp16_matmul(x_msfp, proj_weights_msfp)[:B * N, :proj_weights.size(0)].view(B, N, proj_weights.size(0)) + proj_bias
         x = self.proj_drop(x)
         return x
 
