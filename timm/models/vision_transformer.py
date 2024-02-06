@@ -85,11 +85,14 @@ class Attention(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
+### Original ####################################################################################################################################
         # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+### MSFP ########################################################################################################################################
         qkv_weights, qkv_bias = dict(self.qkv.named_parameters())['weight'].data, dict(self.qkv.named_parameters())['bias'].data
         qkv_weights_msfp, x_msfp = fp32_to_msfp16(qkv_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
         qkv = msfp16_matmul(x_msfp, qkv_weights_msfp)[:B * N, :qkv_weights.size(0)].view(B, N, qkv_weights.size(0)) + qkv_bias
         qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+### End #########################################################################################################################################
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
 
@@ -106,15 +109,19 @@ class Attention(nn.Module):
             x = attn @ v
 
         x = x.transpose(1, 2).reshape(B, N, C)
+### Original ####################################################################################################################################
         # x = self.proj(x)
+### MSFP ########################################################################################################################################
         proj_weights, proj_bias = dict(self.proj.named_parameters())['weight'].data, dict(self.proj.named_parameters())['bias'].data
         proj_weights_msfp, x_msfp = fp32_to_msfp16(proj_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
         x = msfp16_matmul(x_msfp, proj_weights_msfp)[:B * N, :proj_weights.size(0)].view(B, N, proj_weights.size(0)) + proj_bias
+### End #########################################################################################################################################
         x = self.proj_drop(x)
         return x
 
 
 class LayerScale(nn.Module):
+
     def __init__(
             self,
             dim: int,
