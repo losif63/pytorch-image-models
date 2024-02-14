@@ -49,6 +49,7 @@ from ._manipulate import named_apply, checkpoint_seq, adapt_input_conv
 from ._registry import generate_default_cfgs, register_model, register_model_deprecations
 
 from src.msfp.quantize import fp32_to_msfp16, msfp16_matmul
+from src.mul8acc16.quantize import fp8e4m3_matmul, fp8e5m2_matmul
 
 __all__ = ['VisionTransformer']  # model_registry will add each entrypoint fn to this
 
@@ -88,10 +89,20 @@ class Attention(nn.Module):
 ### Original ####################################################################################################################################
         # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
 ### MSFP ########################################################################################################################################
-        qkv_weights, qkv_bias = dict(self.qkv.named_parameters())['weight'].data, dict(self.qkv.named_parameters())['bias'].data
-        qkv_weights_msfp, x_msfp = fp32_to_msfp16(qkv_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
-        qkv = msfp16_matmul(x_msfp, qkv_weights_msfp)[:B * N, :qkv_weights.size(0)].view(B, N, qkv_weights.size(0)) + qkv_bias
-        qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        # qkv_weights, qkv_bias = dict(self.qkv.named_parameters())['weight'].data, dict(self.qkv.named_parameters())['bias'].data
+        # qkv_weights_msfp, x_msfp = fp32_to_msfp16(qkv_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
+        # qkv = msfp16_matmul(x_msfp, qkv_weights_msfp)[:B * N, :qkv_weights.size(0)].view(B, N, qkv_weights.size(0)) + qkv_bias
+        # qkv = qkv.reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+### MUL8ACC16 ###################################################################################################################################
+        # qkv_weights = dict(self.qkv.named_parameters())['weight'].data
+        # qkv_bias = dict(self.qkv.named_parameters())['bias'].data.to(torch.float16)
+        # product = fp8e4m3_matmul(x.view(-1, C), qkv_weights.transpose(0, 1)).view(B, N, qkv_weights.size(0))
+        # qkv = (product + qkv_bias).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4).to(torch.float32)
+### MUL8ACC16_E5M2 ##############################################################################################################################
+        qkv_weights = dict(self.qkv.named_parameters())['weight'].data
+        qkv_bias = dict(self.qkv.named_parameters())['bias'].data.to(torch.float16)
+        product = fp8e5m2_matmul(x.view(-1, C), qkv_weights.transpose(0, 1)).view(B, N, qkv_weights.size(0))
+        qkv = (product + qkv_bias).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4).to(torch.float32)
 ### End #########################################################################################################################################
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
@@ -112,9 +123,19 @@ class Attention(nn.Module):
 ### Original ####################################################################################################################################
         # x = self.proj(x)
 ### MSFP ########################################################################################################################################
-        proj_weights, proj_bias = dict(self.proj.named_parameters())['weight'].data, dict(self.proj.named_parameters())['bias'].data
-        proj_weights_msfp, x_msfp = fp32_to_msfp16(proj_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
-        x = msfp16_matmul(x_msfp, proj_weights_msfp)[:B * N, :proj_weights.size(0)].view(B, N, proj_weights.size(0)) + proj_bias
+        # proj_weights, proj_bias = dict(self.proj.named_parameters())['weight'].data, dict(self.proj.named_parameters())['bias'].data
+        # proj_weights_msfp, x_msfp = fp32_to_msfp16(proj_weights).transpose(0, 1), fp32_to_msfp16(x.view(-1, C))
+        # x = msfp16_matmul(x_msfp, proj_weights_msfp)[:B * N, :proj_weights.size(0)].view(B, N, proj_weights.size(0)) + proj_bias
+### MUL8ACC16 ###################################################################################################################################
+        # proj_weights = dict(self.proj.named_parameters())['weight'].data
+        # proj_bias = dict(self.proj.named_parameters())['bias'].data.to(torch.float16)
+        # product = fp8e4m3_matmul(x.view(-1, C), proj_weights.transpose(0, 1)).view(B, N, proj_weights.size(0))
+        # x = (product + proj_bias).to(torch.float32)
+### MUL8ACC16_E5M2 ##############################################################################################################################
+        proj_weights = dict(self.proj.named_parameters())['weight'].data
+        proj_bias = dict(self.proj.named_parameters())['bias'].data.to(torch.float16)
+        product = fp8e5m2_matmul(x.view(-1, C), proj_weights.transpose(0, 1)).view(B, N, proj_weights.size(0))
+        x = (product + proj_bias).to(torch.float32)
 ### End #########################################################################################################################################
         x = self.proj_drop(x)
         return x
@@ -702,7 +723,31 @@ class VisionTransformer(nn.Module):
             x = x[:, 0]  # class token
         x = self.fc_norm(x)
         x = self.head_drop(x)
-        return x if pre_logits else self.head(x)
+        if pre_logits:
+            return x
+        else:
+### Original ####################################################################################################################################
+            # return self.head(x)
+### MSFP ########################################################################################################################################
+            # H, W = x.shape
+            # head_weights, head_bias = dict(self.head.named_parameters())['weight'].data, dict(self.head.named_parameters())['bias'].data
+            # head_weights_msfp, x_msfp = fp32_to_msfp16(head_weights).transpose(0, 1), fp32_to_msfp16(x)
+            # head_x = msfp16_matmul(x_msfp, head_weights_msfp)[:H, :head_weights.size(0)] + head_bias
+            # return head_x
+### MUL8ACC16 ###################################################################################################################################
+            # head_weights = dict(self.head.named_parameters())['weight'].data
+            # head_bias = dict(self.head.named_parameters())['bias'].data.to(torch.float16)
+            # product = fp8e4m3_matmul(x, head_weights.transpose(0, 1))
+            # head_x = (product + head_bias).to(torch.float32)
+            # return head_x
+### MUL8ACC16_E5M2 ##############################################################################################################################
+            head_weights = dict(self.head.named_parameters())['weight'].data
+            head_bias = dict(self.head.named_parameters())['bias'].data.to(torch.float16)
+            product = fp8e5m2_matmul(x, head_weights.transpose(0, 1))
+            head_x = (product + head_bias).to(torch.float32)
+            return head_x
+### End #########################################################################################################################################
+            
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.forward_features(x)
